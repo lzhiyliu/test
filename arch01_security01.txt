@@ -1,0 +1,717 @@
+--
+
+安全
+
+
+
+黑（骇）客	开锁（备案）
+工具宝宝
+
+
+
+安全
+
+360     TX管家
+防火墙   selinux
+加密     验证
+ACL
+tcp_warpper
+
+
+安全
+
+
+1,硬件安全（机房安全，服务器上锁，服务器bios密码，grub密码等,luks硬盘或分区加密,键盘字母顺序打乱等)
+2,密码安全（密码复杂度，定期更改密码,密码策略等）
+3,用户安全或安全操作管理（访问控制，访问时间控制，锁屏－普通用户ctrl+alt+l;root用户可以安装类似xlock软件来实现.rhel7,centos7默认就可以锁屏了.rhel6里要禁止在3级别ctrl+alt+delete关机－把/etc/init/control-alt-delete.conf里的start on control-alt-delete这句给注释掉;rhel7,centos7里注释或删除/usr/lib/systemd/system/ctrl-alt-del.target文件)
+4,服务安全（每个服务一般都有自己的加强安全的方法或参数，还有些可以拖管到类似xinetd下加强安全等;tcp_wrapper;xinetd)
+5,验证安全(nis,ldap,kerberos可以实现用户集中化管理，还有些软件的验证数据是放在数据库里的（如邮件系统的用户就有数据库或ldap这种方式);pam可植入式验证模块;)
+6,网络或网络通讯安全(tunnel或vpn;iptables或firewalld;gpg传输加密;ssl/tls;ssh登录安全)
+7,软件安全（漏洞，bug，软件更新，软件安装时检测签名)
+8,系统审计，日志统计，日志管理
+9,权限加强(把一些重要的系统文件降权如:chmod 600 /etc/passwd等;文件acl;selinux;sudo等)
+10,入侵检测（入侵后完全性检查，数据入侵分析）
+
+11,公司内部安全（找老实有职业操守的员工,制定操作规范,老板加工资给员工幸福感@_@)
+
+
+
+docs.redhat.com
+参考文档:Red_Hat_Enterprise_Linux-6-Security_Guide-en-US.pdf
+        Red_Hat_Enterprise_Linux-7-Security_Guide-zh-CN.pdf
+
+
+============================================================================================
+
+加密
+
+硬盘分区加密	cryptsetup     luks (linux unify  key setup )
+文件加密     	PGP(Pretty Good Privacy)  gpg (GNU Privacy Guard)
+网络通讯加密	SSL/TLS    tunnel   VPN(virtual private network)
+
+
+
+LUKS(Linux  Unified  Key Setup-on-disk-format)是为Linux硬盘加密标准。
+通过提供一个标准的磁盘上的格式，它不仅方便之间分布的兼容性，而且还提供了多个用户密码的安全管理。
+必须首先对加密的卷进行解密,才能挂载其中的文件系统
+
+可以直接对分区或者逻辑卷来进行加密
+
+
+# rpm -qf `which cryptsetup` 
+cryptsetup-1.7.2-1.el7.x86_64
+
+
+
+       cryptsetup  -  setup cryptographic volumes for
+       dm-crypt (including LUKS extension)
+
+
+--下面我在虚拟机上测试，新加一个盘(大小1Ｇ就ok了)，分成/dev/vdb1，不格式化
+[root@localhost ~]# cryptsetup luksFormat /dev/vdb1
+
+WARNING!
+========
+This will overwrite data on /dev/vdb1 irrevocably.
+
+Are you sure? (Type uppercase yes): YES		--要大写的YES
+Enter LUKS passphrase: 
+Verify passphrase: 			--两次密码一致，并且在centos7里的版本要求密码不能太简单，有一定复杂度
+
+
+[root@localhost ~]# cryptsetup luksOpen /dev/vdb1 secretdisk	--这里是把这个加密磁盘做一个映射，后面的secretdisk这个名字自定义
+Enter passphrase for /dev/vdb1: 	--输入上一步设定的密码
+
+[root@localhost ~]# ls /dev/mapper/secretdisk 	--就会产生这个设备文件
+/dev/mapper/secretdisk
+
+
+[root@localhost ~]# mkfs.xfs /dev/mapper/secretdisk	--格式化，第一次需要，后面再次访问就不用了
+
+[root@localhost ~]# mount /dev/mapper/secretdisk /mnt/	--挂载后，就可以进行读写操作了
+
+
+[root@localhost /]# umount /mnt/	--如果不使用的话，先umount掉，
+
+[root@localhost /]# cryptsetup luksClose /dev/mapper/secretdisk  --再close掉，那么/dev/mapper就没有secretdisk这个设备文件了
+
+
+[root@localhost /]# mount /dev/vdb1 /mnt/	--想对原设备进行挂载也是没有用的
+mount: unknown filesystem type 'crypto_LUKS'
+
+
+[root@localhost ~]# cryptsetup luksOpen /dev/vdb1 abc	--如果想要再次使用,就用这个命令再次open一个映射,名字可以不和上次的一样;当然还是需要输入你的密码
+
+
+
+[root@localhost ~]# ls /dev/mapper/abc	--就有这个设备了,挂载就可以得到里面的加密数据了
+
+
+
+--也就是说,你就算得到了root权限;没有密码,是没有办法得到里面的数据的;当然你可以格式化/dev/vdb1,但数据肯定就都没了
+
+
+
+======================================================================================
+
+
+文件加密
+
+
+对称加密
+--用同一个密钥进行加密,也要使用这个密钥去解密;所以不适合网络传输的加密;因为你在本地用密钥加密了,传数据给另一方还需要连密钥也传给他;所以会在中途被截
+
+
+
+				商家
+
+
+				平台
+
+
+			用户(张三)	 银行
+
+
+
+			             网络
+			张三 ----------------------> 银行
+		1     密钥加密文件		 
+		2	        网络传文件和密钥	         		
+		3	   文件和密钥都可能在网络会被截取
+
+
+
+
+
+非对称加密
+--使用一对密钥(公钥和私钥),把公钥给对方,对方要给你传数据,使用这个公钥加密;中途就算被截,没有私钥是解密不了;传过来后,使用你的私钥来解密;所以适合网络传输
+
+
+			             网络
+			张三 ----------------------> 银行
+		1				银行产生或者花钱买一对密钥
+		2				银行把公钥发布到公网，但私钥自己保留
+		3     用银行公钥加密数据		 
+		4	        网络传加密数据给银行就可以	         	
+		5		就算被截取，没有私钥，无法解密
+
+
+
+
+PGP(Pretty Good Privacy)
+gpg (GNU Privacy Guard)
+
+
+例一，本机或远程文件的对称加密与解密
+
+
+加密文件：	
+[root@li ~]# gpg2 -c test 		--c参数是对称加密
+密码：
+重输入密码：
+
+--加密后，产生test.gpg文件，就可以把原文件删除了；rm test -rf
+
+# file test.gpg 		--查看类型
+test.gpg: data
+
+
+# cat test.gpg --乱码
+# vim test.gpg --乱码
+# strings test.gpg	--也看不到
+
+
+
+解密文件：
+[root@li ~]# gpg2 test.gpg 
+
+
+
+--对目录的做加密，先把目录打包，然后再做加密
+
+--上面的加密文件scp传到远程机器，远程机器(任何机器）只要有密码，就可以解密（相当于是把加密文件和密钥一起打包传过去了）
+
+
+
+----------------------------------------------------
+
+
+
+例二,
+通信双方使用密钥对做非对称加密和解密
+
+
+				(时间同步)
+		模拟用户张三			   模拟银行
+		10.1.1.2   －－－－－－－－－－－－  10.1.1.3
+
+
+# yum install gnupg2
+
+
+第一步:
+在银行10.1.1.3上查询自己电脑上的公钥和私钥
+# gpg2 --list-keys	或 gpg2 -k	--查询本机的公钥，现在为空
+# gpg2 --list-secret-keys   或 gpg2 -K --查询本机的私钥，现在为空
+
+
+
+在银行10.1.1.3生成非对称加密的密钥
+# gpg2 --gen-key		--产生一对密钥
+
+
+Please select what kind of key you want:
+   (1) RSA and RSA (default)
+   (2) DSA and Elgamal
+   (3) DSA (sign only)
+   (4) RSA (sign only)
+Your selection? 1			--算法选择默认的1
+RSA keys may be between 1024 and 4096 bits long.
+What keysize do you want? (2048) 	--密钥长度，越长越安全，但加密和解密消耗的资源和时间也较长
+Requested keysize is 2048 bits
+Please specify how long the key should be valid.
+         0 = key does not expire
+      <n>  = key expires in n days
+      <n>w = key expires in n weeks
+      <n>m = key expires in n months
+      <n>y = key expires in n years
+Key is valid for? (0) 1			--密钥过期时间，我这里选择1天是为了方便后面测试
+Key expires at Fri 09 Oct 2015 11:35:11 AM CST
+Is this correct? (y/N) y
+
+GnuPG needs to construct a user ID to identify your key.
+
+Real name: haha
+Name must be at least 5 characters long
+Real name: hahahehe
+Email address: hahahehe@126.com
+Comment: @_@
+You selected this USER-ID:
+    "hahahehe (@_@) <hahahehe@126.com>"
+
+Change (N)ame, (C)omment, (E)mail or (O)kay/(Q)uit? O
+
+
+--在这里输入两次密码，然后产生密钥对，可以需要你去（敲键盘，移动鼠标等去增加随机数)
+
+gpg: checking the trustdb
+gpg: 3 marginal(s) needed, 1 complete(s) needed, PGP trust model
+gpg: depth: 0  valid:   1  signed:   0  trust: 0-, 0q, 0n, 0m, 0f, 1u
+gpg: next trustdb check due at 2015-10-09
+pub   2048R/001CB3D4 2015-10-08 [expires: 2015-10-09]
+      Key fingerprint = 4237 29F0 FE94 C99C 57ED  E0A9 7510 51DF 001C B3D4
+uid                  hahahehe (@_@) <hahahehe@126.com>
+sub   2048R/7F9ADD4B 2015-10-08 [expires: 2015-10-09]
+
+
+--如果不能生成成功，报随机数不够的错误；解决方法：
+--打开另外一个终端，并使用下面的命令查看系统随机数
+# cat /proc/sys/kernel/random/entropy_avail 
+
+--随机数不够，可以在生成这对密钥时，再开一个终端用下面的命令生成一下(如果没有rngd命令，则yum install rng-tools)
+# rngd -r /dev/urandom -o /dev/random -f 
+
+
+# gpg2 -k		--生成后，小写k列出公钥
+
+# gpg2 -K		--大写k列出私钥
+
+
+
+第二步:
+在银行10.1.1.3将公钥传到对方用户张三（这里我们是测试，所以用scp就可以了)
+# gpg2 --export > li.asc	--导出公钥，结尾必须为.asc
+# scp li.asc 10.1.1.2:/root/	--拷到另一台模拟用户张三的电脑
+
+
+
+在用户张三10.1.1.2上导入银行传过来的公钥
+# gpg2 --import /root/li.asc   --先时间同步一下，保证时间一致，再导入
+
+# gpg2 -k
+/root/.gnupg/pubring.gpg
+------------------------
+pub   2048R/001CB3D4 2015-10-08 [expires: 2015-10-09]
+uid                  hahahehe (@_@) <hahahehe@126.com>
+sub   2048R/7F9ADD4B 2015-10-08 [expires: 2015-10-09]
+
+
+					CA
+
+		用户（工商银行公钥)	　	 工商银行		
+
+		　				 钓鱼工商银行
+
+
+
+测试一:
+在用户张三10.1.1.2上把一个测试文件进行加密
+# gpg2 -e -r hahahehe /test.txt        --/test.txt是你准备好的一个测试文件
+	--   -r参数代表公钥的名字,因为你机器可以注册别人的多个公钥
+
+
+把加密的文件传回给银行10.1.1.3
+# scp /test.txt.gpg 10.1.1.3:/test/
+
+
+然后去银行使用自己的私钥去解密，可以解密成功
+# cd /test  
+# gpg2 -d test.txt.gpg 
+
+
+
+测试二：
+如果你把加密的文件传给没有私钥的第三个人（比如用户李四),那么他也用下面的命令去解密,会直接报没有私钥,解密失败
+# gpg2 -d /root/test.txt.gpg 
+gpg: encrypted with RSA key, ID E2F4585F
+gpg: decryption failed: No secret key
+
+
+
+测试三
+把用户张三10.1.1.2的机器时间使用date-s 改成过期后的时间，再加密，就直接报公钥过期，不可用
+
+# gpg2 -e -r hahahehe /test2.txt 
+gpg: hahahehe: skipped: Unusable public key
+gpg: /test2.txt: encryption failed: Unusable public key
+
+
+
+测试四:
+在银行10.1.1.3产生一个回收公钥的证书
+# gpg2 -o cancelhahahehe.asc --gen-revoke hahahehe
+
+传给要被回收的公钥方（用户张三)
+# scp cancelhahahehe.asc 10.1.1.2:/root/
+
+公钥方(用户张三)导入这个回收证书，就可以把原来的uid为hahahehe的这个公钥给失效了
+# gpg2 --import /root/cancelhahahehe.asc
+
+
+公钥方(用户张三)用失效的公钥加密，已经不可以了
+# gpg2 -e -r hahahehe /test2.txt 	
+gpg: hahahehe: skipped: Unusable public key
+gpg: /test2.txt: encryption failed: Unusable public key
+
+
+
+--总结:上面的主要是说明了这个对称加密和非对称加密的原理,和演示了一过加密解密的过程;  实际在网络应用里,不会手动这么麻烦的去做;使用TLS/SSL协议,就是网络上的非对称加密的典型应用
+
+
+密钥的删除：先删除私钥，再删除公钥
+# gpg2 --delete-secret-keys hahahehe
+# gpg2 --delete-keys hahahehe
+
+
+
+----------------------------------------------------------------------------
+
+gpg 数字签名
+对一个文件或者rpm软件包进行签名,就是对数据完整性进行保护,表示这个文件是由官方签名的
+如果你下载的文件或者rpm软件包没有对应的签名，则表示这个文件是可疑的，有可能被人恶意修改过
+很多软件的官网上除了软件包的下载，还有其对应的签名文件和public key文件下载
+
+
+问题1:什么是数字签名?
+就相当于是对电子信息盖章
+
+
+问题2:数字签名有什么用?
+证明电子信息的真实性（比如，我是一个著名软件的作者，我发布一个软件要证明这是我的源代码软件，没有被别人篡改过)
+
+
+
+
+		著名作者，厂商　　　　　　　　　　　　　　　　　　用户
+					　　  　(需要下载,软件包，公钥，签名三个文件)
+					　　　     　商品　防假专家　商品上的签名
+
+
+
+						真画		     唐伯虎
+
+							防假专家（CA认证)
+							
+						假画		     唐伯虎
+
+
+
+
+
+问题3:我要下载一个软件，我找到正确的官方网站下载，是不是就不需要验证签名呢?
+官方网站也可能被黑，所以仍然可能要验证签名　
+
+
+问题4:签名文件也要在官网下载的，所以如果官网被黑，那么签名文件也会被替换,再如何验证?
+如果官方签名文件有CA认证的话，那么你使用被替换的签名文件来验证的话，会有报此签名文件不受信任的提示信息
+
+
+
+签名实验一:
+# vim /etc/yum.repos.d/rhel-source.repo
+[server]
+name=server
+baseurl=file:///yum/Server
+enabled=1
+gpgcheck=1	--把这个0改为1
+
+
+# yum install authd -y	--这里随意用yum安装一个软件包，会出现下面的报错
+
+warning: rpmts_HdrFromFdno: Header V3 RSA/SHA256 Signature, key ID fd431d51: NOKEY
+
+Public key for authd-1.4.3-31.el6_4.x86_64.rpm is not installed
+
+
+
+解决方法一:
+# rpm --import /yum/RPM-GPG-KEY-redhat-release	--导入iso镜像里的key文件 
+
+解决方法二:
+# vim /etc/yum.repos.d/rhel-source.repo
+[server]
+name=server
+baseurl=file:///yum/Server
+enabled=1
+gpgcheck=1
+gpgkey=file:///yum/RPM-GPG-KEY-redhat-release	 --在这里指定gpgkey文件的路径
+
+
+
+
+签名实验二:
+上面演示的是redhat自带的rpm包。如果是下载的非redhat的软件包，那么在这些软件的官方网站除了能下载软件包之外，还可以下载相应的gpg签名文件和public key文件
+
+# 笔记目录下/arch/gpg_sign_soft/	--这是我在mediawiki官方下载的一个软件包及其对应的签名和key文件
+mediawiki-1.25.2.tar.gz  mediawiki-1.25.2.tar.gz.sig  mediawiki_pubkey.txt
+
+
+# gpg2 --verify mediawiki-1.25.2.tar.gz.sig  mediawiki-1.25.2.tar.gz
+gpg: Signature made Tue 11 Aug 2015 05:27:49 AM CST using RSA key ID 23107F8A
+gpg: Can't check signature: No public key
+--这个验证签名，但结果是报:不能检测签名,没有public key的错误
+
+# gpg2 --import mediawiki_pubkey.txt	--导入mediawiki的公钥
+
+
+# gpg2 --verify mediawiki-1.25.2.tar.gz.sig  mediawiki-1.25.2.tar.gz
+gpg: Signature made Tue 11 Aug 2015 05:27:49 AM CST using RSA key ID 23107F8A
+gpg: Good signature from "Chad Horohoe <chad@wikimedia.org>"
+gpg:                 aka "keybase.io/demon <demon@keybase.io>"
+gpg: WARNING: This key is not certified with a trusted signature!
+gpg:          There is no indication that the signature belongs to the owner.
+Primary key fingerprint: 41B2 ABE8 17AD D3E5 2BDA  946F 72BC 1C5D 2310 7F8A
+
+
+看到有good signature from 这一句，说明这个软件包有完整签名，没问题
+
+
+
+# gpg --fingerprint 23107F8A
+pub   2048R/23107F8A 2014-04-29 [expires: 2026-04-29]
+      Key fingerprint = 41B2 ABE8 17AD D3E5 2BDA  946F 72BC 1C5D 2310 7F8A
+uid                  Chad Horohoe <chad@wikimedia.org>
+uid                  keybase.io/demon <demon@keybase.io>
+sub   2048R/51361C13 2014-04-29 [expires: 2026-04-29]
+
+
+# gpg2 --sign-key 23107F8A
+
+pub  2048R/23107F8A  created: 2014-04-29  expires: 2026-04-29  usage: SC  
+                     trust: unknown       validity: unknown
+sub  2048R/51361C13  created: 2014-04-29  expires: 2026-04-29  usage: E   
+[ unknown] (1). Chad Horohoe <chad@wikimedia.org>
+[ unknown] (2)  keybase.io/demon <demon@keybase.io>
+
+Really sign all user IDs? (y/N) y
+
+pub  2048R/23107F8A  created: 2014-04-29  expires: 2026-04-29  usage: SC  
+                     trust: unknown       validity: unknown
+ Primary key fingerprint: 41B2 ABE8 17AD D3E5 2BDA  946F 72BC 1C5D 2310 7F8A
+
+     Chad Horohoe <chad@wikimedia.org>
+     keybase.io/demon <demon@keybase.io>
+
+This key is due to expire on 2026-04-29.
+Are you sure that you want to sign this key with your
+key "hahahehe (sdfsfsf) <sdfsf@qq.com>" (C674120D)
+
+Really sign? (y/N) y
+
+You need a passphrase to unlock the secret key for
+user: "hahahehe (sdfsfsf) <sdfsf@qq.com>"
+2048-bit RSA key, ID C674120D, created 2018-01-31
+
+
+
+# gpg2 --verify mediawiki-1.25.2.tar.gz.sig mediawiki-1.25.2.tar.gz
+gpg: Signature made Tue 11 Aug 2015 05:27:49 AM CST using RSA key ID 23107F8A
+gpg: checking the trustdb
+gpg: 3 marginal(s) needed, 1 complete(s) needed, PGP trust model
+gpg: depth: 0  valid:   1  signed:   1  trust: 0-, 0q, 0n, 0m, 0f, 1u
+gpg: depth: 1  valid:   1  signed:   0  trust: 1-, 0q, 0n, 0m, 0f, 0u
+gpg: next trustdb check due at 2018-02-01
+gpg: Good signature from "Chad Horohoe <chad@wikimedia.org>"
+gpg:                 aka "keybase.io/demon <demon@keybase.io>"
+
+
+
+
+
+======================================================================================
+
+
+
+SSL/TLS
+
+
+ssl	secure socket layer      安全套接层
+tls	transfer  layer  secure	 传输层安全
+
+
+http+ssl/tls=https
+
+做ssl加密的优点:
+	安全传输
+	　缺点:
+	影响性能，需要花费一定费用维护证书
+
+
+课后作业：
+上网查查为什么百度或其它网站进入了全站的https时代
+
+
+
+
+https  = http + ssl　　　（端口为443)
+
+1，安装ssl包
+# yum install httpd httpd-devel openssl\* mod_ssl -y	 
+
+
+# ls /etc/httpd/conf.d/ssl.conf   --安装成功后，会产生一个http支持ssl的子配置文件 
+/etc/httpd/conf.d/ssl.conf
+# ls /etc/httpd/modules/mod_ssl.so 	--也会有一个支持ssl的模块
+/etc/httpd/modules/mod_ssl.so
+
+
+
+
+2，使用rpm版的ssl创建证书和密钥
+# cd /etc/pki/tls/certs/
+
+# make httpd.crt	--证书名字可以随意写，扩展名用crt（不一定）
+umask 77 ; \
+        /usr/bin/openssl genrsa -des3 1024 > httpd.key
+Generating RSA private key, 1024 bit long modulus
+....................++++++
+.........................++++++
+e is 65537 (0x10001)
+Enter pass phrase:
+Verifying - Enter pass phrase:	--两次密码，自己设定，以后有用
+umask 77 ; \
+        /usr/bin/openssl req -utf8 -new -key httpd.key -x509 -days 365 -out httpd.crt -set_serial 0
+Enter pass phrase for httpd.key:	--输密码
+
+
+Country Name (2 letter code) [GB]:cn
+State or Province Name (full name) [Berkshire]:guangdong
+Locality Name (eg, city) [Newbury]:shenzhen
+Organization Name (eg, company) [My Company Ltd]:haha
+Organizational Unit Name (eg, section) []:it
+Common Name (eg, your name or your server's hostname) []:li.cluster.com
+Email Address []:li@126.com
+
+
+3,编译httpd配置文件，让它支持ssl
+# vim /etc/httpd/conf.d/ssl.conf
+
+100 SSLCertificateFile /etc/pki/tls/certs/httpd.crt		--证书，就是公钥，散发到网上的
+107 SSLCertificateKeyFile /etc/pki/tls/certs/httpd.key	--私钥，自己保存的
+
+
+4,重启apache
+# systemctl restart httpd	--如果重启服务卡，那就绑定主机名，并pkill httpd之后再启动
+Enter SSL pass phrase for vm4.cluster.com:443 (RSA) : ******   
+Enter SSL pass phrase for vm4.cluster.com:443 (RSA) : ******   --输入创建证书时的密码
+
+			
+
+# netstat -ntlup |grep httpd
+tcp        0      0 :::80                       :::*                        LISTEN      5821/httpd          
+tcp        0      0 :::443                      :::*                        LISTEN      5821/httpd 
+
+
+
+5,测试
+使用另一台机器打开firefox
+使用下面的url来访问，下载并确认证书
+https://serverIP/	
+
+
+
+===============================================================================
+
+nginx+ssl
+
+
+如果是源码编译的版本，则nginx在源码编译时要加--with-http_ssl_module编译参数来支持SSL
+
+
+下面在centos7.3上使用rpm版来做
+# cd /etc/pki/tls/certs/
+# make nginx.crt       --创建证书，得到nginx.crt和nginx.key
+
+# yum install nginx*
+
+
+# vim /etc/nginx/nginx.conf  --在server { } 配置段里加上下面三句
+
+	listen    443 ssl;
+
+        ssl_certificate      /etc/pki/tls/certs/nginx.crt;
+        ssl_certificate_key  /etc/pki/tls/certs/nginx.key;
+
+
+
+然后重启nginx就可以了
+# systemctl stop httpd
+# systemctl start nginx	--启动报错
+
+解决方法:
+# cd /etc/pki/tls/certs/
+# cp nginx.key nginx.key.bak
+# openssl rsa -in nginx.key.bak -out nginx.key
+
+# systemctl start nginx	--再次启动ok
+
+
+问题:比如我输入www.baidu.com会自动转成https://www.baidu.com
+用rewrite规则可以实现
+
+
+=====================================================================================
+
+
+
+http+ssl=https
+smtp+ssl=smtps
+imap+ssl=imaps
+pop3+ssl=pop3s
+
+
+ftp+ssl=ftps
+			华为本部　	  华为外包公司
+				ftp+ssl(自签)  
+		
+
+samba+ssl=smbs
+tomcat+ssl=https  
+dns+ssl		--没有
+nfs+ssl		--没有
+rsync+ssl	--没有
+
+总结:一般ssl的应用主要是https,smtps和ftps也有应用。
+
+============================================================================================
+
+
+
+
+VPN
+
+
+
+
+	    10.1.1.2 br0	     	       10.1.1.3 br0		   	
+	     外1（深圳VPN）	     		 外2（北京VPN)
+	    192.168.100.2 virbr1	       192.168.101.3 virbr2
+
+
+
+内1 (深圳内网机器）				     内2 （北京内网机器)
+192.168.100.5 virbr1				192.168.101.5 virbr2
+网关指向192.168.100.2				网关指向192.168.101.3
+
+
+
+
+===================================================================================
+
+
+
+# showmount -e 10.1.1.1
+Export list for 10.1.1.1:
+/share/iso *
+
+# ls /share/iso/cn_windows_7_ultimate_x86_dvd_x15-65907.iso 
+
+
+
+=================================================================================
+
+
+
+
+
+

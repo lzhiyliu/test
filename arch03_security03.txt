@@ -1,0 +1,727 @@
+--
+
+
+
+pam      Pluggable Authentication Modules for Linux
+linux可植入式验证模块
+
+
+
+先问一个问题：
+我是root管理员，同时有很多普通用户也可以登录这个操作系统，我如何拒绝所有的普通用户登录系统？
+
+
+/bin/bash		--可以登录系统，可以登录ftp，可以收发邮件	
+/sbin/nologin		--不能登录系统，可以登录ftp，可以收发邮件
+/bin/false		--不能登录系统，不能登录ftp，可以收发邮件
+
+
+
+比如用下面的脚本可以实现
+#!/bin/bash
+
+awk -F: '$3>999 && $3!=65534 {print $1}' /etc/passwd |while read user
+do
+        sed -i '/^'$user':/s/\/bin\/bash/\/sbin\/nologin/' /etc/passwd
+done
+
+
+
+user1   /sbin/nologin
+user2   /bin/bash
+
+
+user1   /sbin/nologin
+user2   /sbin/nologin
+
+
+user1   /bin/bash
+user2   /bin/bash
+
+
+
+
+# ls /lib64/security/	--这里有大量的pam模块
+
+这么多模块，如何查看使用方法
+# man pam_access	--这就是查看pam_access.so的man文档，以此类推其它模块
+
+
+
+# ldd /usr/sbin/vsftpd |grep libpam	--支持这个模块，则表示这个程序可以由pam来控制(但这个方法不是唯一的方法)
+	libpam.so.0 => /lib64/libpam.so.0 (0x00007f3fe253a000)
+
+
+
+PAM的配置文件一般存放在/etc/pam.conf文件，或者/etc/pam.d/目录下。不过现在一般都会存放在/etc/pam.d/目录下，之下是相对于每个需要被PAM控制的程序的独立配置文件。当一个程序的验证方式配置在pam.conf和pam.d/下某文件中出现时，以pam.d/目录下文件为准
+
+
+
+--你可以这样理解，用户名和密码这种简单验证就相当于是一个简单的锁，只有用户名和密码对应正确就可以成功。
+--而pam的各种模块相当于是具备各种功能的锁（除了普通机械锁，可能还有看门狗,密码锁，声音识别，指纹识别，人脸识别，眼角膜识别等等）.
+--把这些锁安装到门或者柜子这些需要加固的东西上（门和柜子在linux里就是类似系统login,ssh登录,ftp登录这种相应的程序).
+--你可以控制打开其中一个或几个锁，你就可以成功进入；也可以控制你要打开所有的锁，你就可以成功进入
+
+
+
+# cat /etc/pam.d/login 	--以这个控制系统登录的配置文件为例，每一行就是一个控制方式
+#%PAM-1.0
+auth [user_unknown=ignore success=ok ignore=ignore default=bad] pam_securetty.so
+auth       include      system-auth
+account    required     pam_nologin.so
+account    include      system-auth
+password   include      system-auth
+# pam_selinux.so close should be the first session rule
+session    required     pam_selinux.so close
+session    required     pam_loginuid.so
+session    optional     pam_console.so
+# pam_selinux.so open should only be followed by sessions to be executed in the user context
+session    required     pam_selinux.so open
+session    required     pam_namespace.so
+session    optional     pam_keyinit.so force revoke
+session    include      system-auth
+-session   optional     pam_ck_connector.so
+
+
+一般第一列指定的内容是：module-type，一共就只有4种，分别是：
+
+auth：对用户身份进行识别，如提示输入密码，判断是否root；
+account：对账号各项属性进行检查，如是否允许登录，是否达到最大用户数；
+session：定义登录前，及退出后所要进行的操作，如登录连接信息，用户数据的打开和关闭，挂载fs；
+password：使用用户信息来更新数据，如修改用户密码。
+
+第二列内容是：control-flag，有很多，不过一般常用的是4种，分别是：
+
+
+规定如何处理PAM模块鉴别认证的结果，简而言之就是鉴别认证成功或者失败之后会发生什么事，如何进行控制。单个应用程序可以调用多种底层模块，通常称为“堆叠”。对应于某程序按照配置文件中出现顺序执行的所有模块成为“堆”，堆中的各模块的地位与出错时的处理方式由control_flag栏的取值决定，他的四种可能的取值分别为required、Requisite、sufficient或_optional：
+
+
+required：表示该行以及所涉及模块的成功是用户通过鉴别的必要条件。换句话说，只有当对应于应用程序的所有带 required标记的模块全部成功后，该程序才能通过鉴别。同时，如果任何带required标记的模块出现了错误，PAM并不立刻将错误消息返回给应用程序，而是在所有模块都调用完毕后才将错误消息返回调用他的程序。 反正说白了，就是必须将所有的模块都执行一次，其中任何一个模块验证出错，验证都会继续进行，并在执行完成之后才返回错误信息。这样做的目的就是不让用户知道自己被哪个模块拒绝，通过一种隐蔽的方式来保护系统服务。就像设置防火墙规则的时候将拒绝类的规则都设置为drop一样，以致于用户在访问网络不成功的时候无法准确判断到底是被拒绝还是目标网络不可达。
+
+
+requisite：与required相仿，只有带此标记的模块返回成功后，用户才能通过鉴别。不同之处在于其一旦失败就不再执行堆中后面的其他模块，并且鉴别过程到此结束，同时也会立即返回错误信息。与上面的required相比，似乎要显得更光明正大一些。
+
+
+
+sufficient：表示该行以及所涉及模块验证成功是用户通过鉴别的充分条件。也就是说只要标记为sufficient的模块一旦验证成功，那么PAM便立即向应用程序返回成功结果而不必尝试任何其他模块。即便后面的层叠模块使用了requisite或者required控制标志也是一样。当标记为sufficient的模块失败时，sufficient模块会当做 optional对待。因此拥有sufficient 标志位的配置项在执行验证出错的时候并不会导致整个验证失败，但执行验证成功之时则大门敞开。所以该控制位的使用务必慎重。
+
+
+optional：他表示即便该行所涉及的模块验证失败用户仍能通过认证。在PAM体系中，带有该标记的模块失败后将继续处理下一模块。也就是说即使本行指定的模块验证失败，也允许用户享受应用程序提供的服务。使用该标志，PAM框架会忽略这个模块产生的验证错误，继续顺序执行下一个层叠模块。
+
+
+
+include：表示在验证过程中调用其他的PAM配置文件。在RHEL系统中有相当多的应用通过完整调用/etc/pam.d/system-auth来实现认证而不需要重新逐一去写配置项。这也就意味着在很多时候只要用户能够登录系统，针对绝大多数的应用程序也能同时通过认证。
+
+
+
+老板指定的亲戚	sufficient
+无犯罪记录	requisite
+不要工资		sufficient	 	
+你吃饭了吗 	optional
+技术笔试		required
+技术主管面试	required
+HR面试		required
+
+
+
+性别女		requisite	sufficient     required    optional
+长得好看		required	
+年龄比自己小	required	
+孝顺		required
+贤惠		required
+善良		required	
+
+
+条件一   required
+条件二   required 
+条件三   required
+--表示不管如何三个条件都要判断，如果三个条件有一个或多个失败，最后都会告诉你失败，但你不知道是哪个失败。只有三个条件都成功，才会最终成功
+
+
+条件一	required
+条件二	requisite
+条件三	required
+--表示三个条件都成功，最终才会成功。如果第二个条件失败，则不会验证第三个条件，直接最终失败。如果第一个条件失败，第二个成功，第三个条件仍然验证（但成功与否不重要），最终是失败。
+
+
+条件一	　sufficient
+条件二	　required
+条件三	　required
+--表示满足条件一，则验证成功。或者条件一失败，但条件二和条件三同时满足，也验证成功
+
+
+条件一	　requisite
+条件二	　sufficient
+条件三	　required
+条件四	　required
+--表示条件一必须满足，否则验证直接失败。条件二成功，则验证直接成功。如果条件二失败，则需要条件三和条件四同时满足，才验证成功。
+
+
+条件一	  required
+条件二	  requisite
+条件三	  required	
+条件四	  sufficient	
+条件五	  required
+条件六	  required
+条件七	  requisite  
+条件八     sufficient
+条件九	  required
+条件十     required
+--注意:required如果失败，不会验证后面的sufficient
+第一种:1,2,3，4要成功。
+第二种:1，2，3,5，6，7,8要成功，4失败
+第三种:1，2，3，5，6，7，9，10都成功，4，8失败
+
+
+
+例1，根据/etc/pam.d/login的第四行来进行测试
+account    required     pam_nologin.so
+
+man pam_nologin
+
+
+# touch /etc/nologin
+然后登出用户，再用普通用户登录测试，发现所有普通用户都登录不了系统了
+# rm /etc/nologin  -rf
+删除此文件，普通用户又可以登录
+
+
+
+测试时，可以用3级别的普通用户登陆来测试，或者远程用普通用户ssh来测试。不要使用su - 普通用户测试
+
+
+
+例2，根据/etc/pam.d/vsftpd的第二行进行测试（使用pam实现服务登录的黑名单或白名单)
+
+auth       required	pam_listfile.so item=user sense=deny file=/etc/vsftpd/ftpusers onerr=succeed
+
+
+/etc/vsftpd/ftpusers文件里列出的用户，就算是你加入了白名单，也登录不了，如果你把这个用户名从/etc/vsftpd/ftpusers文件里删掉，或者把sense=deny改为sense=allow，那么这个用户就可以登录ftp了
+
+
+可以通过查看/var/log/secure日志看到pam相关的拒绝信息
+
+
+--前两个例子就是用于控制系统用户登录的，你可以将这两个模块应用到ssh,ftp,samba等相关服务也可以实现相同的效果　
+
+
+
+例3,vim /etc/pam.d/login	--把下面这句加到最前面
+account     requisite     pam_time.so
+
+vim /etc/security/time.conf  	--然后修改这个配置文件，在最后加上
+login;*;abc;!Th1700-1800	--表示针对login程序实现abc用户在任何终端（只对tty终端有效，图形登录无效）非周四的17点到18点才能登录
+
+
+login;tty1;abc;!We1100-1300	--abc用户在周三的11点到13点不能在tty1登录系统，但可以在tty2,tty3等其它终端正常登录
+
+
+
+例4,vim /etc/pam.d/sshd		--把下面这句加到最前面
+account     requisite     pam_time.so
+
+
+vim /etc/security/time.conf 
+sshd;*;abc;!Th1700-1800		--这样测试就是abc用户在周四的17点到18点不能ssh登录
+
+
+--例3和例4是通过pam_time模块来控制服务的用户在特定的时间才能登录，同样也可以应用到vsftpd等服务
+
+
+
+例5:控制密码复杂度(rhel7使用pam_pwquality模块替代pam_cracklib模块，但centos7.3使用pam_cracklib仍然有效）
+# vim /etc/pam.d/passwd		--在此文件最前面加上下面一行
+password required pam_cracklib.so  minlen=8 minclass=4　difok=3　 maxrepeat=3 maxsequence=5
+
+测试：使用普通用户自己改自己的密码来测试（这里要求是长度为8，字符类型要包含4类:数字，小写字母，大写字母，符号;difok=3表示新改的密码和老密码最少需要变动3个字符)
+maxrepeat=3表示重复相同字节不要超过3个，比如666可以，但6666就不行
+maxsequence=5表示类似12345或febcd这种连续字节不能超过5位
+
+
+
+
+例6,vim /etc/pam.d/sshd		--把下面这句加到最前面
+auth   required   pam_tally2.so lock_time=10
+
+
+--测试结果为当你ssh登录时，如果输错密码，那么你再紧接着输对密码也不能成功登录，必须要等10秒之后再输对才能成功登录
+
+auth   required   pam_tally2.so deny=3 even_deny_root lock_time=1200	--表示连续失败的次数等于或超过3次，就会锁定1200秒；可以通过pam_tally2 --user=root命令查看连续失败的次数。被锁定后可以使用pam_tally2 --user=root --reset把连续失败次数清零
+
+
+
+
+
+例7,vim /etc/pam.d/login	--验证此文件默认有的第一句pam_securetty模块
+auth [user_unknown=ignore success=ok ignore=ignore default=bad] pam_securetty.so
+
+
+# vim /etc/securetty
+tty2				--只留下tty2，表示只能在tty2进行root用户登录（非root用户不受影响)
+
+
+
+例8:把例7应用到ssh进行测试
+vim /etc/pam.d/sshd	--最前面加上下面这一句
+auth [user_unknown=ignore success=ok ignore=ignore default=bad] pam_securetty.so
+
+
+# vim /etc/securetty
+tty2
+ssh			--在原来的基础上加上ssh才可以被root用户ssh登录（非root用户不受影响)		
+
+
+例9， vim /etc/pam.d/sshd		--把下面这句加到最前面
+account     requisite   pam_echo.so     haha
+
+--测试结果为ssh这台机器成功，就会显示后面的字符串haha
+
+你想要登录ssh时显示一个信息，有哪些方法:
+方法1
+/etc/motd
+方法2
+/etc/profile
+方法3
+# vim /etc/ssh/sshd_config 
+Banner /etc/ssh/banner
+
+# vim /etc/ssh/banner
+haha
+# systemctl restart sshd
+
+方法4
+pam
+
+
+=================================================================================================
+
+
+selinux
+
+
+   selinux   -   NSA   Security-Enhanced   Linux
+       (SELinux)
+
+selinux不是防火墙，他可以和iptables,pam，系统权限等共存
+
+
+简单的说:selinux就是在原来的r,w,x,s,t系统权限的基础上扩展了很多其它权限。比如:httpd服务的内容，原来基本就只有是否能读，是否能写的权限。加上selinux还得加上端口是否能换，不同地方拷来的文件是否权限一样，家目录是否能换，等等
+
+
+把selinux做个比方:
+就象一个公司加了非常多的规章制度（相比于selinux来说，规章制度可能有成千上w，甚至几十w条），细小到类似规定上班时间上厕所的次数，每次最多几分钟等）
+
+
+类似于一套安防系统（对本人和小偷都有效)
+
+
+
+
+
+访问者subject(user或role):也就是程序(进程)  
+目标object:要访问的目标文件或目录或进程
+安全上下文context:类似系统的rwx权限 
+政策规则policy:（包括bool值，使用getsebool -a查看)
+
+
+# ll -Z /etc/yp.conf
+-rw-r--r--. root root system_u:object_r:net_conf_t:s0  /etc/yp.conf
+# ll -Z /etc/fstab 
+-rw-r--r-- root root ?                                /etc/fstab
+
+
+
+
+比较上面的两文件区别
+1,一个权限九位后面有一个点，另一个没有点.(有点号表示有selinux相关的策略和安全上下文;没点则相反)
+
+为什么有的有点号,有的没点号?
+这说明这个操作系统以前是打开selinux的（rhel6,rhel7安装系统默认就打开了），但后来又关闭了selinux，并且在关闭后修改过的文件就会没有这个点号了.或者在关闭selinux的状态下新创建的文件也没有点号.
+
+
+
+
+
+查看selinux是否开启
+# getenforce	--查看selinux是在哪种级别
+# sestatus 	--可以查看selinux现在的状态
+
+
+
+#setenforce 1    --临时马上生效，切换成enforcing
+#setenforce 0    --切换成permissive
+--disabled和这两种模式不能切换，需要改配置文件重启系统
+
+
+
+
+# vim /etc/selinux/config
+
+# This file controls the state of SELinux on the system.
+# SELINUX= can take one of these three values:
+#       enforcing - SELinux security policy is enforced.  --强制级别，违反策略就不允许
+#       permissive - SELinux prints warnings instead of enforcing.	--允许级别，违反发警告
+#       disabled - SELinux is fully disabled.	--直接关闭selinux
+SELINUX=disabled		
+# SELINUXTYPE= can take one of three two values:
+#     targeted - Targeted processes are protected,
+#     minimum - Modification of targeted policy. Only selected processes are protected. 
+#     mls - Multi Level Security protection.
+SELINUXTYPE=targeted 
+
+
+--selinux类型，也就是策略policy现在分为2大类。
+	targeted  主要是对网络服务进行保护,类似奄割版
+	minimum　　　更进一步的奄割版		
+	mls	  对整个系统进行多级别保护,类似完全版
+
+
+把SELINUX=disabled改成SELINUX=enforcing，然后reboot系统
+如果你原来一直是disabled的情况用了比较久的时间，现在第一次开启selinux，系统重新启动时，会有一个把/下的文件relable	
+--这个relable会要等待一段时间（10分钟到10几分钟，由文件大小和硬盘速度决定)
+
+
+
+# ll -Z /etc/fstab 
+-rw-r--r--. root root system_u:object_r:etc_t:s0       /etc/fstab
+
+
+system_u:object_r:etc_t:s0
+
+--这就是身份（user)，角色(role)，类型(type） s0(保护等级,也就是MLS用的,我们这里是targeted,不用这种)
+
+
+身份:（主要为下面二种，但还有其它）
+system_u  表示系统程序
+unconfined_u  代表普通用户下的文件
+
+# yum install setools-console  -y
+
+
+# seinfo -u		--查看有哪些身份
+
+Users: 8
+   sysadm_u
+   system_u
+   xguest_u
+   root
+   guest_u
+   staff_u
+   user_u
+   unconfined_u
+
+
+
+角色:(主要有下面两种，但还有其它不常用的）
+object_r: 代表文件或目录
+system_r: 代表程序
+
+
+# seinfo -r
+
+Roles: 14
+   auditadm_r
+   dbadm_r
+   guest_r
+   staff_r
+   user_r
+   logadm_r
+   object_r
+   secadm_r
+   sysadm_r
+   system_r
+   webadm_r
+   xguest_r
+   nx_server_r
+   unconfined_r
+
+
+
+类型:
+	type:用ll -Z 文件查出的就为type
+	domain:ps -efZ |grep http  查出程序的就为domain
+
+
+# seinfo -t
+
+
+seinfo - SELinux policy query tool
+
+-a   列出所有相关的属性
+-u   列出selinux的所有user
+-t   列出selinux的所有type
+-r   列出selinux的所有role
+-b   列出所有布尔值
+
+
+
+===========================================================================================================
+
+
+
+--（建议在一个新的虚拟机下开启selinux来做下面的例子)
+下面以rpm的http为例
+
+例1:
+
+# yum install httpd httpd-devel -y
+# echo "main page" > /var/www/html/index.html
+
+# systemctl  start httpd --启动服务后，用客户端浏览器是可以访问的
+
+
+# ll -Z /etc/passwd
+-rw-r--r--. root root system_u:object_r:passwd_file_t:s0 /etc/passwd
+# cp /etc/passwd /var/www/html/		--注意这里是cp
+
+# touch /root/123
+# ll -Z /root/123
+-rw-r--r--. root root unconfined_u:object_r:admin_home_t:s0 /root/123
+# mv /root/123 /var/www/html/		--注意这里是mv
+
+
+
+# ll /var/www/html/ -Zd
+drwxr-xr-x. root root system_u:object_r:httpd_sys_content_t:s0 /var/www/html/
+
+
+# ll /var/www/html/ -Z
+-rw-r--r--. root root unconfined_u:object_r:admin_home_t:s0 123
+-rw-r--r--. root root unconfined_u:object_r:httpd_sys_content_t:s0 index.html
+-rw-r--r--. root root unconfined_u:object_r:httpd_sys_content_t:s0 passwd
+--现在可以发现在apache默认家目录下创建的文件和cp过来的文件都会和目录的安全上下文一样；但mv的就保留原来的安全上下文（或者使用cp -a命令也可以保留)
+
+
+
+--用另一台客户端使用firefox来访问，主页和passwd文件可以被访问，但123文件不能被访问；其实就是http程序的http_t对123文件的admin_home_t没有访问权限
+
+
+chcon    (change  context)
+	-t  修改类型域
+	-R  递归
+	-r  角色
+	-u  身份
+	--reference=示例文件   把安全上下文改成和示例文件一样
+
+
+所以如果让客户端能够访问123文件，就用下面的命令来修改
+# chcon -t httpd_sys_content_t /var/www/html/123 	--改一个文件
+
+
+# chcon -t httpd_sys_content_t  -R /var/www/html/	--递归改整个目录下的所有文件和子目录
+
+
+
+例2：
+# mkdir /www
+# vim /etc/httpd/conf/httpd.conf	--把家目录改成/www
+119 DocumentRoot "/www"
+131 <Directory "/www">
+# systemctl restart httpd
+
+
+--对比一下原家目录和现家目录
+# ll /var/www/html/ -dZ
+drwxr-xr-x  root root system_u:object_r:httpd_sys_content_t /var/www/html/
+
+# ll /www/ -dZ
+drwxr-xr-x  root root root:object_r:default_t          /www/
+
+
+# echo "www main page" > /www/index.html	--在现家目录里建立一个主页
+# ll -Z /www/index.html 	--查看主页信息，是继承了上级目录的属性
+-rw-r--r--  root root root:object_r:default_t          /www/index.html
+	
+
+
+客户端访问，却访问不到里面的网页文件，因为网页文件权限属性没改
+
+
+解决方法：加－R参数把整个目录都修改
+# chcon -R -u system_u -t httpd_sys_content_t /www/
+或者使用--reference指定按照谁来修改context
+# chcon -R --reference=/var/www/html/ /www/
+
+
+
+例3:
+apache默认只监听80和443这两个端口,如果你改为监听12000，则启动为报错
+
+
+# rpm -qf `which semanage`
+policycoreutils-python-2.5-8.el7.x86_64
+
+
+# yum install policycoreutils-python
+
+# semanage port -l |grep http		 －－查看http相关支持端口
+http_cache_port_t              tcp      3128, 8080, 8118, 8123, 10001-10010
+http_cache_port_t              udp      3130
+http_port_t                    tcp      80, 81, 443, 488, 8008, 8009, 8443, 9000
+pegasus_http_port_t            tcp      5988
+pegasus_https_port_t           tcp      5989
+
+
+
+
+解决方法：
+
+# semanage port -a -t http_port_t -p tcp 12000
+
+
+# semanage port -l |grep http_port_t	--再次去查，就可以看到有12000这个端口了
+http_port_t                    tcp      12000, 80, 81, 443, 488, 8008, 8009, 8443, 9000
+pegasus_http_port_t            tcp      5988
+
+
+
+除了这些控制外，还有一个布尔值也控制着访问权限
+
+# getsebool -a		--查找所有的布尔值
+# getsebool -a |grep http	--查找与http有关的布尔值
+# getsebool -a |grep allow_ypbind	--查看上个例子改后的值
+
+
+
+====================================================================================================
+
+用selinux　　
+目的:加强安全.当按照需求对外提供服务时，如果需求与selinux规则冲突时，就需要修改selinux规则迎合需求
+
+
+
+使用selinux排错工具和日志来进行selinux的辅助排错
+
+# yum install selinux\* setroubleshoot\* policy\*   -y
+
+
+# systemctl status auditd.service	--确认审计日志服务开启
+# cat /var/log/audit/audit.log 	--此日志里有selinux相关的信息，但是不容易看懂
+
+# sealert -a /var/log/audit/audit.log   --以比较容易懂的方式查看selinux的日志，并给出解决的提示
+
+
+# sealert		--打开图形排错工具
+
+
+
+selinux排错的总结:
+1,如果服务访问不了，或者是服务里的文件访问不了等问题；可以先尝试
+# setenforce 0改成permissive；如果改了还不能访问，那么肯定就不是selinux的问题了；如果改了就可以访问，那么可以确认是selinux的问题
+
+2，如果是selinux的问题，那么就访问一下让他报错，然后通过查日志，或者图形工具来查看解决方法
+
+# sealert -a /var/log/audit/audit.log   
+
+# sealert 
+
+3，根本日志里提供的信息来进行排错
+
+4, 如果仍然不能解决，请自行百度，谷歌
+
+5, 解决后，做好工作笔记，以后就直接把selinux问题解决
+
+
+
+
+排错实例1(实现让普通用户登录samba,可以在自己的家目录上传下载）
+1,在服务器端安装samba，并启动
+# yum install samba-* -y
+# systemctl start smb.service 
+# useradd abc
+# smbpasswd -a abc
+New SMB password:
+Retype new SMB password:
+Added user abc.
+
+
+
+2,
+用普通用户abc登录samba服务器自己的家目录后，ls查看不到里面的内容，也下载不了
+# smbclient //10.1.1.2/abc  -U abc
+Enter abc's password: 
+Domain=[MYGROUP] OS=[Unix] Server=[Samba 3.6.9-164.el6]
+smb: \> ls
+NT_STATUS_ACCESS_DENIED listing \*
+smb: \> get 123			--这里最好get 123下载一下，否则samba服务器那边使用sealert出不来提示信息
+NT_STATUS_ACCESS_DENIED opening remote file \123
+smb: \> put /etc/fstab fstab	--客户端的/etc/fstab上传到samba服务器取名仍然叫fstab，但也被selinux禁止
+NT_STATUS_ACCESS_DENIED opening remote file \fstab
+
+
+通过sealert图形提示知道解决方法为:
+setsebool -P samba_enable_home_dirs 1
+
+
+
+
+排错实例2
+smb服务器自定义一个共享后，使用普通用户abc登录，也是ls查看不到内容，也下载和上传不了
+
+
+# vim /etc/samba/smb.conf
+
+        [test]
+        comment = test
+        path = /test
+        public = no
+        writable = yes
+
+# systemctl restart smb.service 
+
+# mkdir /test
+# chmod 757 /test
+# touch /test/123	 --touch一个文件做下载测试
+
+客户端
+# smbclient  //10.1.1.2/test -U abc	--可以登录成功，但是ls看不到内容
+Enter abc's password: 
+Domain=[MYGROUP] OS=[Unix] Server=[Samba 3.6.9-164.el6]
+smb: \> ls
+NT_STATUS_ACCESS_DENIED listing \*
+smb: \> get 123
+NT_STATUS_ACCESS_DENIED opening remote file \123
+smb: \> put /etc/inittab inittab
+NT_STATUS_ACCESS_DENIED opening remote file \inittab
+
+
+
+
+通过sealert图形提示知道解决方法为:
+方法一:
+#semanage fcontext -a -t samba_share_t /test
+#restorecon  -v /test
+
+方法二:
+setsebool -P samba_export_all_rw 1
+
+
+
+
+--总结:如果一个服务不能访问；那么一般的检查步骤为:服务器端口-->网络－>iptables->服务配置－>系统权限->pam->selinux
+--在生产环境中，在配置服务时，可以打开selinux，并使用上面的方法让你的服务可以被正常访问，这样就加强了安全（因为别人就算找到你服务的漏洞并破解，他仍然会受系统的selinux的限制）
+
+
+========================================================================================
+
+
+
+
+题目:
+在selinux环境允许ftp匿名上传文件（要求换一个新的ftp家目录/ftp，不用默认的/var/ftp)
+
+
+方法一:
+1，chmod 757 /ftp
+2, 要vsftpd的主配置文件里加上下面两个参数anon_upload_enable=YES和anon_mkdir_write_enable=YES
+3, setsebool -P allow_ftpd_full_access 1
+
+
+方法二:
+1，chmod 757 /ftp
+2, 要vsftpd的主配置文件里加上下面两个参数anon_upload_enable=YES和anon_mkdir_write_enable=YES
+3, chcon -t ftpd_tmp_t -R /ftp
+
+
+
+
